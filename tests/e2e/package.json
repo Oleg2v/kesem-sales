@@ -1,0 +1,13 @@
+{
+  "name": "smart-document-search-e2e",
+  "private": true,
+  "description": "End-to-end tests for Smart Document Search (wp-env + Playwright). Dev only, not part of the plugin zip.",
+  "scripts": {
+    "env": "wp-env",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@wordpress/env": "11.16.0"
+  }
+}
