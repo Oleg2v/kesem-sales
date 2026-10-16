@@ -39,7 +39,7 @@ function hds_test_reset() {
 }
 
 /**
- * Test clock: hds_test_set_time() overrides time() for code using hds_now().
+ * Test clock: hds_test_set_time() sets the time used by the stubs (see hds_test_now()).
  *
  * @param int|null $timestamp Timestamp or null for real time.
  * @return void
@@ -303,8 +303,7 @@ if ( ! function_exists( 'sanitize_text_field' ) ) {
 }
 
 /**
- * Current time honouring the test clock. Production code may call
- * hds_now() only if it defines its own fallback; prefer time().
+ * Current time honouring the test clock (tests only; production code uses time()).
  *
  * @return int
  */

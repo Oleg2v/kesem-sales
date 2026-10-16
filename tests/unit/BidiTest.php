@@ -127,6 +127,14 @@ class BidiTest extends TestCase {
 		$this->assertSame( $expected, HDS_Bidi::fix_text( $visual ) );
 	}
 
+	public function test_fix_text_left_to_right_paragraph_with_hebrew_words(): void {
+		// A line that starts and ends with Latin letters is a left-to-right
+		// paragraph: only its Hebrew stretches are reversed.
+		$visual   = "טפשמ תיב\nPlaintiff: ילארשי לארשי 5 ןוחב, Tel Aviv\nןידה קספ לש ףקות ןתינ";
+		$expected = "בית משפט\nPlaintiff: בחון 5 ישראל ישראלי, Tel Aviv\nניתן תוקף של פסק הדין";
+		$this->assertSame( $expected, HDS_Bidi::fix_text( $visual ) );
+	}
+
 	public function test_fix_text_leaves_logical_text_untouched(): void {
 		foreach ( array( 'SH-22-06-57879-590', 'ARAR-25-09-8059' ) as $name ) {
 			$text = (string) file_get_contents( HDS_FIXTURES_DIR . '/reference/' . $name . '.txt' );

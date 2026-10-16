@@ -140,19 +140,7 @@ final class HDS_License {
 	 */
 	public static function verify( string $license_key, string $domain, string $public_key_b64 = '' ): bool {
 		try {
-			if ( ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
-				return false;
-			}
-			if ( '' === $public_key_b64 ) {
-				$public_key_b64 = self::public_key();
-			}
-			$public_key = self::decode( $public_key_b64, self::PUBLIC_KEY_BYTES );
-			$signature  = self::decode( $license_key, self::SIGNATURE_BYTES );
-			$message    = self::normalize_domain( $domain );
-			if ( '' === $public_key || '' === $signature || '' === $message ) {
-				return false;
-			}
-			return true === sodium_crypto_sign_verify_detached( $signature, $message, $public_key );
+			return self::verify_signature( $license_key, self::normalize_domain( $domain ), $public_key_b64 );
 		} catch ( \Throwable $e ) {
 			return false;
 		}
@@ -177,7 +165,12 @@ final class HDS_License {
 
 		$cache_key = hash( 'sha256', $public_key . '|' . $domain . '|' . $key );
 		if ( ! isset( self::$cache[ $cache_key ] ) ) {
-			self::$cache[ $cache_key ] = self::verify( $key, $domain, $public_key );
+			try {
+				// $domain is already normalized: normalizing twice would strip a second "www.".
+				self::$cache[ $cache_key ] = self::verify_signature( $key, $domain, $public_key );
+			} catch ( \Throwable $e ) {
+				self::$cache[ $cache_key ] = false;
+			}
 		}
 		return self::$cache[ $cache_key ];
 	}
@@ -199,6 +192,26 @@ final class HDS_License {
 	 */
 	public static function reset_cache(): void {
 		self::$cache = array();
+	}
+
+	/**
+	 * Check a signature of an already normalized domain.
+	 *
+	 * @param string $license_key    Base64 signature.
+	 * @param string $message        Normalized domain (the signed message).
+	 * @param string $public_key_b64 Base64 public key; '' = the built-in PUBLIC_KEY.
+	 * @return bool
+	 */
+	private static function verify_signature( string $license_key, string $message, string $public_key_b64 ): bool {
+		if ( '' === $message || ! function_exists( 'sodium_crypto_sign_verify_detached' ) ) {
+			return false;
+		}
+		$public_key = self::decode( '' === $public_key_b64 ? self::public_key() : $public_key_b64, self::PUBLIC_KEY_BYTES );
+		$signature  = self::decode( $license_key, self::SIGNATURE_BYTES );
+		if ( '' === $public_key || '' === $signature ) {
+			return false;
+		}
+		return true === sodium_crypto_sign_verify_detached( $signature, $message, $public_key );
 	}
 
 	/**

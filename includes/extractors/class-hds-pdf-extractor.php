@@ -63,6 +63,13 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 	const ESTIMATED_EM_PER_SPACE = 0.25;
 
 	/**
+	 * Font::decodeText() turns a TJ adjustment below
+	 * (-50 x factor / 4) thousandths of an em into a space: 16 means gaps
+	 * wider than 0.2 em are word breaks, letter-spacing is not.
+	 */
+	const DECODE_FONT_FACTOR = 16.0;
+
+	/**
 	 * Font metrics cache (spl_object_id => metrics|null), per extraction.
 	 *
 	 * @var array<int, array|null>
@@ -171,8 +178,8 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 			throw new HDS_Extraction_Exception( HDS_Extraction_Exception::CORRUPT, 'The PDF could not be parsed (it may be damaged).' );
 		}
 
-		$text = implode( "\n", $texts );
-		if ( preg_match_all( '/[\p{L}\p{N}]/u', $text ) < self::MIN_TEXT_CHARS ) {
+		$text = HDS_Encoding::scrub_utf8( implode( "\n", $texts ) );
+		if ( (int) preg_match_all( '/[\p{L}\p{N}]/u', $text ) < self::MIN_TEXT_CHARS ) {
 			if ( count( $pages ) === $unreadable ) {
 				// The page dictionaries themselves could not be read: not a scan.
 				throw new HDS_Extraction_Exception( HDS_Extraction_Exception::UNSUPPORTED, 'The structure of this PDF is not supported by the built-in reader. Re-save it as PDF (e.g. "Print to PDF") and upload it again.' );
@@ -238,17 +245,23 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 	}
 
 	/**
-	 * Does the file declare an /Encrypt dictionary (in a trailer or a
-	 * cross-reference stream dictionary)?
+	 * Does the file declare an /Encrypt dictionary? Trailers and
+	 * cross-reference stream dictionaries sit at the end of the file (and,
+	 * when linearized, near the start), so only those regions are searched:
+	 * text inside the document cannot cause a false positive.
 	 *
 	 * @param string $data Raw PDF bytes.
 	 * @return bool
 	 */
 	private static function has_encrypt_dictionary( string $data ): bool {
-		if ( false === strpos( $data, '/Encrypt' ) ) {
-			return false;
+		$length  = strlen( $data );
+		$regions = $length <= 131072 ? array( $data ) : array( substr( $data, 0, 65536 ), substr( $data, -65536 ) );
+		foreach ( $regions as $region ) {
+			if ( false !== strpos( $region, '/Encrypt' ) && preg_match( '/\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/', $region ) ) {
+				return true;
+			}
 		}
-		return (bool) preg_match( '/\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/', $data );
+		return false;
 	}
 
 	/**
@@ -285,23 +298,218 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 	 * @return string|null
 	 */
 	private function positional_text( $page ) {
+		$contents = self::resolve( $page->get( 'Contents' ) );
+		$data     = '';
+		if ( $contents instanceof ElementArray ) {
+			foreach ( $contents->getContent() as $part ) {
+				$part = self::resolve( $part );
+				if ( is_object( $part ) && method_exists( $part, 'getContent' ) ) {
+					$data .= (string) $part->getContent() . "\n";
+				}
+			}
+		} elseif ( is_object( $contents ) && method_exists( $contents, 'getHeader' ) ) {
+			$data = (string) $contents->getContent();
+		}
+		if ( '' === $data ) {
+			return null;
+		}
+
 		$runs    = array();
 		$visited = array();
-		$this->walk( $page, $page, $page->extractRawData(), array( 1.0, 0.0, 0.0, 1.0, 0.0, 0.0 ), $runs, $visited, 0 );
+		$this->walk( $page, $page, self::parse_content( $data ), array( 1.0, 0.0, 0.0, 1.0, 0.0, 0.0 ), $runs, $visited, 0 );
 		$text = $runs ? implode( "\n", $this->lines( $runs ) ) : '';
 		return preg_match( '/[\p{L}\p{N}]/u', $text ) ? $text : null;
 	}
 
 	/**
+	 * Tokenize a content stream into commands:
+	 * [ 'o' => operator, 't' => type of a string operand ('(' or '<'),
+	 *   'c' => operands (numbers/names joined by spaces, the raw string, or
+	 *   for TJ a list of [ 't' => '(' | '<' | 'n', 'c' => raw ]) ].
+	 *
+	 * Own tokenizer (PDF 7.2/7.8): literal strings with nesting and
+	 * escapes, hex strings, names, numbers, arrays, dictionaries, comments
+	 * and inline images (BI ... ID <binary> EI) are skipped correctly.
+	 *
+	 * @param string $data Decoded content stream.
+	 * @return array[]
+	 */
+	private static function parse_content( string $data ): array {
+		$commands = array();
+		$operands = array();
+		$array    = null; // Items of an open [ ... ] array.
+		$length   = strlen( $data );
+		$offset   = 0;
+		$token    = '/\G(?:([\x00\x09\x0A\x0C\x0D\x20]+)|(%[^\r\n]*)|(<<)|(>>)|<([0-9A-Fa-f\x00\x09\x0A\x0C\x0D\x20]*)>|(\[)|(\])|\/([^\x00\x09\x0A\x0C\x0D\x20\/\[\]()<>{}%]*)|([+\-]?(?:\d+\.?\d*|\.\d+))(?![^\x00\x09\x0A\x0C\x0D\x20\/\[\]()<>{}%])|([^\x00\x09\x0A\x0C\x0D\x20\/\[\]()<>{}%]+)|(.))/s';
+		$dict     = 0;
+
+		while ( $offset < $length ) {
+			if ( '(' === $data[ $offset ] ) {
+				$end = self::literal_end( $data, $offset );
+				$raw = substr( $data, $offset + 1, $end - $offset - 1 );
+				$offset = $end + 1;
+				if ( $dict > 0 ) {
+					continue;
+				}
+				$item = array(
+					't' => '(',
+					'c' => $raw,
+				);
+				if ( null !== $array ) {
+					$array[] = $item;
+				} else {
+					$operands[] = $item;
+				}
+				continue;
+			}
+			if ( ! preg_match( $token, $data, $m, 0, $offset ) ) {
+				break;
+			}
+			$offset += strlen( $m[0] );
+			if ( isset( $m[3] ) && '' !== $m[3] ) {
+				$dict++;
+				continue;
+			}
+			if ( isset( $m[4] ) && '' !== $m[4] ) {
+				$dict = max( 0, $dict - 1 );
+				continue;
+			}
+			if ( $dict > 0 || ( isset( $m[1] ) && '' !== $m[1] ) || ( isset( $m[2] ) && '' !== $m[2] ) ) {
+				continue; // Inside a dictionary, whitespace or a comment.
+			}
+			if ( isset( $m[5] ) && '<' === $m[0][0] ) {
+				$item = array(
+					't' => '<',
+					'c' => (string) preg_replace( '/[^0-9A-Fa-f]/', '', $m[5] ),
+				);
+			} elseif ( isset( $m[6] ) && '' !== $m[6] ) {
+				$array = array();
+				continue;
+			} elseif ( isset( $m[7] ) && '' !== $m[7] ) {
+				if ( null !== $array ) {
+					$operands[] = array(
+						't' => '[',
+						'c' => $array,
+					);
+				}
+				$array = null;
+				continue;
+			} elseif ( isset( $m[8] ) && '/' === $m[0][0] ) {
+				$item = array(
+					't' => '/',
+					'c' => $m[8],
+				);
+			} elseif ( isset( $m[9] ) && '' !== $m[9] ) {
+				$item = array(
+					't' => 'n',
+					'c' => $m[9],
+				);
+			} elseif ( isset( $m[10] ) && '' !== $m[10] ) {
+				if ( null !== $array ) {
+					continue; // Stray keyword inside an array.
+				}
+				$operator = $m[10];
+				if ( 'ID' === $operator ) {
+					// Inline image data: skip to the EI operator.
+					if ( preg_match( '/[\x00\x09\x0A\x0C\x0D\x20]EI(?=[\x00\x09\x0A\x0C\x0D\x20]|$)/', $data, $ei, PREG_OFFSET_CAPTURE, $offset + 1 ) ) {
+						$offset = $ei[0][1] + strlen( $ei[0][0] );
+					} else {
+						$offset = $length;
+					}
+					$operands = array();
+					continue;
+				}
+				$commands[] = self::command( $operator, $operands );
+				$operands   = array();
+				continue;
+			} else {
+				continue; // Stray delimiter.
+			}
+			if ( null !== $array ) {
+				$array[] = $item;
+			} else {
+				$operands[] = $item;
+			}
+		}
+		return $commands;
+	}
+
+	/**
+	 * Index of the ")" closing the literal string that starts at $start.
+	 *
+	 * @param string $data  Content.
+	 * @param int    $start Offset of "(".
+	 * @return int Offset of the closing parenthesis (or the last byte).
+	 */
+	private static function literal_end( string $data, int $start ): int {
+		$length = strlen( $data );
+		$depth  = 0;
+		for ( $i = $start; $i < $length; $i++ ) {
+			$char = $data[ $i ];
+			if ( '\\' === $char ) {
+				$i++;
+			} elseif ( '(' === $char ) {
+				$depth++;
+			} elseif ( ')' === $char ) {
+				$depth--;
+				if ( 0 === $depth ) {
+					return $i;
+				}
+			}
+		}
+		return $length - 1;
+	}
+
+	/**
+	 * Build a command in the format walk() expects.
+	 *
+	 * @param string  $operator Operator.
+	 * @param array[] $operands Operands.
+	 * @return array
+	 */
+	private static function command( string $operator, array $operands ): array {
+		$command = array(
+			'o' => $operator,
+			't' => '',
+			'c' => '',
+		);
+		if ( 'TJ' === $operator ) {
+			$items = array();
+			foreach ( $operands as $operand ) {
+				if ( '[' === $operand['t'] ) {
+					$items = $operand['c'];
+				}
+			}
+			$command['c'] = $items;
+			return $command;
+		}
+		$plain = array();
+		foreach ( $operands as $operand ) {
+			if ( '(' === $operand['t'] || '<' === $operand['t'] ) {
+				$command['t'] = $operand['t'];
+				$command['c'] = $operand['c'];
+			} elseif ( 'n' === $operand['t'] || '/' === $operand['t'] ) {
+				$plain[] = $operand['c'];
+			}
+		}
+		if ( '' === $command['t'] ) {
+			$command['c'] = implode( ' ', $plain );
+		} elseif ( '"' === $operator ) {
+			$command['n'] = $plain;
+		}
+		return $command;
+	}
+
+	/**
 	 * Interpret a content stream with a small text-state machine (q/Q/cm,
-	 * BT, Tf, Tc, Tw, Tz, TL, Td, TD, Tm, T*, Tj, TJ, ', Do) and collect
+	 * BT, Tf, Tc, Tw, Tz, TL, Td, TD, Tm, T*, Tj, TJ, ', ", Do) and collect
 	 * positioned runs. Each run is a string drawn left to right, so its
 	 * characters are in visual order; a TJ array is split where it moves
 	 * the pen backwards (some generators place several runs with one TJ).
 	 *
 	 * @param object  $page      The page (font/XObject fallback).
 	 * @param object  $resources Page or form XObject owning the stream.
-	 * @param array   $commands  Commands from extractRawData()/getCommandsText().
+	 * @param array   $commands  Commands from parse_content().
 	 * @param float[] $ctm       Current transformation matrix.
 	 * @param array[] $runs      Collected runs (by reference).
 	 * @param array   $visited   Form XObjects already entered (loop guard).
@@ -331,11 +539,12 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 			$operand = isset( $command['c'] ) && is_string( $command['c'] ) ? $command['c'] : '';
 			switch ( $op ) {
 				case 'q':
-					$stack[] = $ctm;
+					// The text state (font, spacing, leading) is part of the graphics state.
+					$stack[] = array( $ctm, $state );
 					break;
 				case 'Q':
 					if ( $stack ) {
-						$ctm = array_pop( $stack );
+						list( $ctm, $state ) = array_pop( $stack );
 					}
 					break;
 				case 'cm':
@@ -397,10 +606,15 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 					}
 					break;
 				case 'T*':
-				case '"':
 					$tlm = self::multiply( array( 1.0, 0.0, 0.0, 1.0, 0.0, -$state['leading'] ), $tlm );
 					$tm  = $tlm;
 					break;
+				case '"':
+					if ( isset( $command['n'][0], $command['n'][1] ) && is_numeric( $command['n'][0] ) && is_numeric( $command['n'][1] ) ) {
+						$state['tw'] = (float) $command['n'][0];
+						$state['tc'] = (float) $command['n'][1];
+					}
+					// Fall through: same as ' with the new spacing.
 				case "'":
 					$tlm = self::multiply( array( 1.0, 0.0, 0.0, 1.0, 0.0, -$state['leading'] ), $tlm );
 					$tm  = $tlm;
@@ -455,13 +669,7 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 				$matrix = $numbers;
 			}
 		}
-		$commands = array();
-		foreach ( $form->getSectionsText( (string) $form->getContent() ) as $section ) {
-			foreach ( $form->getCommandsText( $section ) as $command ) {
-				$commands[] = $command;
-			}
-		}
-		$this->walk( $page, $form, $commands, self::multiply( $matrix, $ctm ), $runs, $visited, $depth + 1 );
+		$this->walk( $page, $form, self::parse_content( (string) $form->getContent() ), self::multiply( $matrix, $ctm ), $runs, $visited, $depth + 1 );
 		unset( $visited[ $id ] );
 	}
 
@@ -572,13 +780,13 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 	 * @return string
 	 */
 	private static function decode( $font, array $elements, $resources ): string {
-		$text = (string) $font->decodeText( $elements );
+		$text = (string) $font->decodeText( $elements, self::DECODE_FONT_FACTOR );
 		if ( preg_match( '/[\x00-\x08\x0E-\x1F\x7F]/', $text ) ) {
 			foreach ( $resources->getFonts() as $other ) {
 				if ( $other === $font ) {
 					continue;
 				}
-				$retry = (string) $other->decodeText( $elements );
+				$retry = (string) $other->decodeText( $elements, self::DECODE_FONT_FACTOR );
 				if ( ! preg_match( '/[\x00-\x08\x0E-\x1F\x7F]/', $retry ) ) {
 					$text = $retry;
 					break;
@@ -1041,9 +1249,10 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 			)
 		);
 
-		// Generators that write space glyphs need no synthetic spaces between
-		// words; a gap there is justification or a bidi-run boundary, and only
-		// a wide one (table columns) separates text.
+		// Generators that write space glyphs need fewer synthetic spaces: a
+		// small gap there is justification at a bidi-run boundary ("17%," must
+		// stay together); a gap wider than ~1/3 em is a missing space glyph or
+		// a table column. Without space glyphs, 0.2 em separates words.
 		$has_spaces = false;
 		foreach ( $runs as $run ) {
 			// A leading space may be the parser's guess; others are glyphs.
@@ -1052,7 +1261,7 @@ final class HDS_Pdf_Extractor implements HDS_Extractor_Interface {
 				break;
 			}
 		}
-		$factor = $has_spaces ? 0.8 : 0.2;
+		$factor = $has_spaces ? 0.35 : 0.2;
 
 		$line        = '';
 		$end         = null;

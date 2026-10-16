@@ -184,7 +184,8 @@ final class HDS_Encoding {
 				'encoding' => self::UTF16BE,
 			);
 		}
-		if ( mb_check_encoding( $bytes, 'UTF-8' ) ) {
+		// NUL bytes never occur in real UTF-8 text but do in BOM-less UTF-16.
+		if ( false === strpos( substr( $bytes, 0, 8192 ), "\0" ) && mb_check_encoding( $bytes, 'UTF-8' ) ) {
 			return array(
 				'text'     => $bytes,
 				'encoding' => self::UTF8,

@@ -68,6 +68,17 @@ final class HDS_Normalizer {
 	);
 
 	/**
+	 * Boilerplate added by nevo.co.il exports: the "copied from Nevo"
+	 * watermark (often glued to the next word) and the standard footer.
+	 * Pattern => replacement. Filterable via `hds_boilerplate_patterns`.
+	 */
+	const BOILERPLATE = array(
+		'/הועתק מנבו/u'                                         => '',
+		'/נוסח מסמך זה כפוף לשינויי ניסוח ועריכה/u'             => '',
+		'/בעניין עריכה ושינויים במסמכי פסיקה, חקיקה ועוד באתר נבו[^\n]*/u' => '',
+	);
+
+	/**
 	 * Clean text right after extraction.
 	 *
 	 * @param string $text UTF-8 text (invalid sequences are replaced).
@@ -105,6 +116,24 @@ final class HDS_Normalizer {
 	}
 
 	/**
+	 * Remove known export boilerplate (see BOILERPLATE).
+	 *
+	 * @param string $text UTF-8 text.
+	 * @return string
+	 */
+	public static function strip_boilerplate( string $text ): string {
+		$patterns = self::BOILERPLATE;
+		if ( function_exists( 'apply_filters' ) ) {
+			$patterns = (array) apply_filters( 'hds_boilerplate_patterns', $patterns );
+		}
+		if ( ! $patterns ) {
+			return $text;
+		}
+		$result = preg_replace( array_keys( $patterns ), array_values( $patterns ), $text );
+		return is_string( $result ) ? $result : $text;
+	}
+
+	/**
 	 * Full normalization for stored chunks and for queries.
 	 *
 	 * @param string $text UTF-8 text.
@@ -112,10 +141,13 @@ final class HDS_Normalizer {
 	 */
 	public static function normalize( string $text ): string {
 		$text = self::clean_extracted( $text );
+		$text = self::strip_boilerplate( $text );
 		$text = strtr( $text, self::PRESENTATION_FORMS );
 		$text = self::remove_nikud( $text );
 		$text = self::normalize_punctuation( $text );
 		$text = (string) preg_replace( '/ {2,}/', ' ', $text );
+		$text = (string) preg_replace( '/ *\n */', "\n", $text );
+		$text = (string) preg_replace( "/\n{3,}/", "\n\n", $text );
 		return trim( $text );
 	}
 
@@ -133,14 +165,16 @@ final class HDS_Normalizer {
 
 	/**
 	 * Split text into lowercase word tokens. Keeps internal quotes,
-	 * apostrophes and dashes so עו"ד, ג'ורג' and 57879-06-22 stay whole.
+	 * apostrophes and dashes so עו"ד, ג'ורג' and 57879-06-22 stay whole,
+	 * and dots/slashes between digits so 1.5, 12/03/2024 and case numbers
+	 * like 8069-74/25 are single tokens.
 	 *
 	 * @param string $text UTF-8 text.
 	 * @return string[]
 	 */
 	public static function tokenize( string $text ): array {
 		$text = mb_strtolower( self::normalize( $text ), 'UTF-8' );
-		if ( ! preg_match_all( '/[\p{L}\p{N}]+(?:[\'"\-][\p{L}\p{N}]+)*\'?/u', $text, $m ) ) {
+		if ( ! preg_match_all( '/[\p{L}\p{N}]+(?:[\'"\-][\p{L}\p{N}]+|(?<=\p{N})[.\/]\p{N}+)*\'?/u', $text, $m ) ) {
 			return array();
 		}
 		return $m[0];

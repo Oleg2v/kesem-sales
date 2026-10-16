@@ -15,15 +15,17 @@ if ( ! defined( 'ABSPATH' ) ) {
  * The text is cut into words (runs of non-whitespace). Every gap after a word
  * gets a break level:
  *
- * - 3 paragraph end (blank line),
- * - 2 sentence end (. ! ? ; : … or Hebrew sof pasuq, or a line break),
+ * - 4 paragraph end (blank line),
+ * - 3 sentence end: . ! ? … Hebrew sof pasuq, or a line break,
+ * - 2 weak sentence end: ; or : (e.g. the colon in "(להלן: ...)"),
  * - 1 plain word boundary,
  * - 0 inside a word (only between the pieces of a word longer than the chunk
  *   size, which is hard-split as a last resort).
  *
  * A chunk is grown word by word up to SIZE characters, then cut at the last
  * paragraph end that keeps it at least half full, else at the last sentence
- * end that does, else after the last whole word that fits. The next chunk
+ * end that does (strong before weak), else after the last whole word that
+ * fits. The next chunk
  * starts with roughly OVERLAP characters of whole trailing sentences (or, if
  * no sentence boundary is close enough, whole words) of the previous chunk.
  * Chunks never exceed SIZE characters, never start or end inside a word, and
@@ -59,10 +61,15 @@ final class HDS_Chunker {
 	const MIN_SENTENCE_OVERLAP = 0.5;
 
 	/**
-	 * Characters that end a sentence when they end a word: . ! ? ; : …,
-	 * Hebrew sof pasuq, Arabic question mark.
+	 * Characters that end a sentence when they end a word: . ! ? …, Hebrew
+	 * sof pasuq, Arabic question mark.
 	 */
-	const SENTENCE_END_PATTERN = '/[.!?;:\x{2026}\x{05C3}\x{061F}]$/u';
+	const SENTENCE_END_PATTERN = '/[.!?\x{2026}\x{05C3}\x{061F}]$/u';
+
+	/**
+	 * Characters that end a sentence weakly when they end a word: ; :
+	 */
+	const CLAUSE_END_PATTERN = '/[;:]$/u';
 
 	/**
 	 * Closing quotes/brackets that may follow sentence-ending punctuation.
@@ -74,8 +81,9 @@ final class HDS_Chunker {
 	 */
 	const BREAK_NONE      = 0;
 	const BREAK_WORD      = 1;
-	const BREAK_SENTENCE  = 2;
-	const BREAK_PARAGRAPH = 3;
+	const BREAK_CLAUSE    = 2;
+	const BREAK_SENTENCE  = 3;
+	const BREAK_PARAGRAPH = 4;
 
 	/**
 	 * Bytes of text tokenized at a time.
@@ -346,10 +354,7 @@ final class HDS_Chunker {
 			$level = self::BREAK_SENTENCE;
 		} else {
 			$sep   = '' === $gap ? '' : ' ';
-			$level = self::BREAK_WORD;
-			if ( $this->ends_sentence( $word, $this->line_start ) ) {
-				$level = self::BREAK_SENTENCE;
-			}
+			$level = $this->sentence_level( $word, $this->line_start );
 		}
 		$this->line_start = $newlines > 0;
 
@@ -424,20 +429,26 @@ final class HDS_Chunker {
 	}
 
 	/**
-	 * Whether a word ends a sentence.
+	 * Break level after a word followed by a space: sentence, clause or word.
 	 *
 	 * @param string $word       Word (no whitespace).
 	 * @param bool   $line_start Whether the word starts a line.
-	 * @return bool
+	 * @return int
 	 */
-	private function ends_sentence( string $word, bool $line_start ): bool {
-		$core = (string) preg_replace( self::CLOSING_PATTERN, '', $word );
-		if ( ! preg_match( self::SENTENCE_END_PATTERN, $core ) ) {
-			return false;
-		}
+	private function sentence_level( string $word, bool $line_start ): int {
 		// A short enumerator at the start of a line ("2.", "א.", "(ב).") is a list
 		// marker, not a sentence: do not break between it and its text.
-		return ! ( $line_start && mb_strlen( $word, 'UTF-8' ) <= 4 );
+		if ( $line_start && mb_strlen( $word, 'UTF-8' ) <= 4 ) {
+			return self::BREAK_WORD;
+		}
+		$core = (string) preg_replace( self::CLOSING_PATTERN, '', $word );
+		if ( preg_match( self::SENTENCE_END_PATTERN, $core ) ) {
+			return self::BREAK_SENTENCE;
+		}
+		if ( preg_match( self::CLAUSE_END_PATTERN, $core ) ) {
+			return self::BREAK_CLAUSE;
+		}
+		return self::BREAK_WORD;
 	}
 
 	/**
@@ -451,6 +462,7 @@ final class HDS_Chunker {
 	 */
 	private function choose_cut( int $start, int $fresh, int $end, int $min_fill ): int {
 		$sentence_cut = -1;
+		$clause_cut   = -1;
 		for ( $j = $end; $j >= $fresh && $this->span( $start, $j ) >= $min_fill; $j-- ) {
 			$level = $this->level( $j );
 			if ( self::BREAK_PARAGRAPH === $level ) {
@@ -458,10 +470,15 @@ final class HDS_Chunker {
 			}
 			if ( -1 === $sentence_cut && self::BREAK_SENTENCE === $level ) {
 				$sentence_cut = $j;
+			} elseif ( -1 === $clause_cut && self::BREAK_CLAUSE === $level ) {
+				$clause_cut = $j;
 			}
 		}
 		if ( -1 !== $sentence_cut ) {
 			return $sentence_cut;
+		}
+		if ( -1 !== $clause_cut ) {
+			return $clause_cut;
 		}
 		// Whole words: the last word that fits, unless it is a piece of a hard-split word.
 		for ( $j = $end; $j > $fresh; $j-- ) {
@@ -501,7 +518,7 @@ final class HDS_Chunker {
 		$overlap_start = $word_start;
 		$min_sentence  = (int) ceil( $this->overlap * self::MIN_SENTENCE_OVERLAP );
 		for ( $k = $word_start; $k <= $cut; $k++ ) {
-			if ( $this->level( $k - 1 ) >= self::BREAK_SENTENCE ) {
+			if ( $this->level( $k - 1 ) >= self::BREAK_CLAUSE ) {
 				if ( $this->span( $k, $cut ) >= $min_sentence ) {
 					$overlap_start = $k;
 				}

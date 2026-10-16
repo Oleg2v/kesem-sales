@@ -225,6 +225,15 @@ class ChunkerTest extends TestCase {
 		}
 	}
 
+	public function test_full_stop_preferred_over_colon(): void {
+		// '.' at ~60 % of the window, a "(להלן: ...)" colon at ~90 %.
+		$text   = 'הוועדה המקומית דנה בבקשה והחליטה לדחות את ההתנגדות במלואה. '
+			. 'העוררים הגישו ערר (להלן: "הערר") ובו טענו טענות רבות ושונות נגד ההחלטה ונגד השומה המכרעת.';
+		$chunks = ( new HDS_Chunker( 100, 30 ) )->split( $text );
+		$this->assert_invariants( $text, $chunks, 100, 30, false );
+		$this->assertStringEndsWith( 'במלואה.', $chunks[0] );
+	}
+
 	public function test_line_breaks_are_sentence_breaks_and_are_kept(): void {
 		$lines = array();
 		for ( $i = 1; $i <= 40; $i++ ) {

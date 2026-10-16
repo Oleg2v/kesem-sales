@@ -318,10 +318,12 @@ final class HDS_Bidi {
 	 * Convert text to logical order if it is stored in visual order.
 	 *
 	 * The decision is made once for the whole text (is_visual_order()).
-	 * Then every line containing right-to-left characters - or no strong
-	 * characters at all, like ".1" list numbers - is converted; lines that
-	 * contain only Latin text are left alone. Bracket mirroring is chosen
-	 * by whichever variant yields properly ordered brackets.
+	 * Each line is then treated as a right-to-left paragraph and converted
+	 * - lines with Hebrew, and lines without any letter such as ".1" list
+	 * numbers - except lines that start and end with Latin letters, which
+	 * are left-to-right paragraphs: only their Hebrew stretches are
+	 * converted in place. Latin-only lines are left alone. Bracket
+	 * mirroring is chosen by whichever variant yields well-formed brackets.
 	 *
 	 * @param string $text UTF-8 text, lines separated by "\n".
 	 * @return string
@@ -330,36 +332,65 @@ final class HDS_Bidi {
 		if ( ! self::is_visual_order( $text ) ) {
 			return $text;
 		}
-		$lines   = explode( "\n", $text );
-		$convert = array();
+		$lines      = explode( "\n", $text );
+		$directions = array();
 		foreach ( $lines as $index => $line ) {
-			if ( self::should_convert_line( $line ) ) {
-				$convert[ $index ] = true;
+			$direction = self::line_direction( $line );
+			if ( '' !== $direction ) {
+				$directions[ $index ] = $direction;
 			}
 		}
 
-		$mirror = self::detect_mirroring( $lines, $convert );
-		foreach ( $convert as $index => $unused ) {
-			$lines[ $index ] = self::visual_to_logical( $lines[ $index ], $mirror );
+		$mirror = self::detect_mirroring( $lines, $directions );
+		foreach ( $directions as $index => $direction ) {
+			$lines[ $index ] = self::convert_line( $lines[ $index ], $direction, $mirror );
 		}
 		return implode( "\n", $lines );
 	}
 
 	/**
-	 * Should this line of a visual-order text be converted?
+	 * How a line of a visual-order text must be converted.
 	 *
 	 * @param string $line Line.
-	 * @return bool
+	 * @return string 'rtl' (whole line), 'ltr' (Hebrew stretches only) or '' (leave).
 	 */
-	private static function should_convert_line( string $line ): bool {
+	private static function line_direction( string $line ): string {
 		if ( '' === trim( $line ) ) {
-			return false;
+			return '';
 		}
-		if ( preg_match( self::RTL_PATTERN, $line ) ) {
-			return true;
+		if ( ! preg_match( self::RTL_PATTERN, $line ) ) {
+			// Latin text stays; no strong character at all (".1", "06-22")
+			// belongs to a right-to-left paragraph.
+			return preg_match( '/\p{L}/u', $line ) ? '' : 'rtl';
 		}
-		// No strong character at all (".1", "06-22"): part of a right-to-left paragraph.
-		return ! preg_match( '/\p{L}/u', $line );
+		if ( preg_match( '/^[^\p{L}]*(\p{L})/u', $line, $first ) && preg_match( '/(\p{L})[^\p{L}]*$/u', $line, $last )
+			&& ! preg_match( self::RTL_PATTERN, $first[1] ) && ! preg_match( self::RTL_PATTERN, $last[1] ) ) {
+			return 'ltr';
+		}
+		return 'rtl';
+	}
+
+	/**
+	 * Convert one line according to its direction.
+	 *
+	 * @param string $line      Line.
+	 * @param string $direction 'rtl' or 'ltr'.
+	 * @param bool   $mirror    Mirror brackets.
+	 * @return string
+	 */
+	private static function convert_line( string $line, string $direction, bool $mirror ): string {
+		if ( 'ltr' !== $direction ) {
+			return self::visual_to_logical( $line, $mirror );
+		}
+		// Left-to-right paragraph: reverse each stretch from a Hebrew
+		// character to the last Hebrew character before the next Latin letter.
+		return (string) preg_replace_callback(
+			'/[\x{0590}-\x{08FF}\x{FB1D}-\x{FDFF}\x{FE70}-\x{FEFF}](?:[^\p{Latin}]*[\x{0590}-\x{08FF}\x{FB1D}-\x{FDFF}\x{FE70}-\x{FEFF}])?/u',
+			static function ( array $match ) use ( $mirror ) {
+				return self::visual_to_logical( $match[0], $mirror );
+			},
+			$line
+		);
 	}
 
 	/**
@@ -368,20 +399,20 @@ final class HDS_Bidi {
 	 * characters. The variant that gives more well-formed bracket pairs
 	 * wins; mirroring is the default (Unicode rule L4).
 	 *
-	 * @param string[]          $lines   All lines.
-	 * @param array<int, bool> $convert Indexes of lines to convert.
+	 * @param string[]            $lines      All lines.
+	 * @param array<int, string> $directions Lines to convert => direction.
 	 * @return bool
 	 */
-	private static function detect_mirroring( array $lines, array $convert ): bool {
+	private static function detect_mirroring( array $lines, array $directions ): bool {
 		$score_mirrored = 0;
 		$score_plain    = 0;
-		foreach ( $convert as $index => $unused ) {
+		foreach ( $directions as $index => $direction ) {
 			$line = $lines[ $index ];
 			if ( ! preg_match( '/[()\[\]{}<>\x{00AB}\x{00BB}]/u', $line ) ) {
 				continue;
 			}
-			$score_mirrored += self::bracket_score( self::visual_to_logical( $line, true ) );
-			$score_plain    += self::bracket_score( self::visual_to_logical( $line, false ) );
+			$score_mirrored += self::bracket_score( self::convert_line( $line, $direction, true ) );
+			$score_plain    += self::bracket_score( self::convert_line( $line, $direction, false ) );
 		}
 		return $score_mirrored >= $score_plain;
 	}

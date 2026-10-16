@@ -72,6 +72,7 @@ final class HDS_Extractor_Factory {
 	public static function detect_format( string $path, string $ext ): string {
 		$ext  = strtolower( $ext );
 		$head = (string) file_get_contents( $path, false, null, 0, 1024 ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- Local file.
+		$text = ltrim( 0 === strncmp( $head, "\xEF\xBB\xBF", 3 ) ? substr( $head, 3 ) : $head );
 
 		if ( 0 === strncmp( $head, "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1", 8 ) ) {
 			if ( 'doc' === $ext || 'docx' === $ext ) {
@@ -85,9 +86,9 @@ final class HDS_Extractor_Factory {
 			if ( 'pdf' === $ext ) {
 				return 'pdf';
 			}
-		} elseif ( 0 === strncmp( ltrim( $head ), '{\\rtf', 5 ) ) {
+		} elseif ( 0 === strncmp( $text, '{\\rtf', 5 ) ) {
 			throw new HDS_Extraction_Exception( HDS_Extraction_Exception::UNSUPPORTED, 'This is an RTF file saved with a Word extension. Re-save it in Word as .docx and upload again.' );
-		} elseif ( preg_match( '/^\s*(?:<!doctype html|<html|<\?xml[^>]*>\s*<html)/i', $head ) && 'txt' !== $ext ) {
+		} elseif ( preg_match( '/^(?:<!doctype html|<html|<\?xml[^>]*>\s*<html)/i', $text ) && 'txt' !== $ext ) {
 			throw new HDS_Extraction_Exception( HDS_Extraction_Exception::UNSUPPORTED, 'This is an HTML file saved with a Word extension. Re-save it in Word as .docx and upload again.' );
 		}
 
