@@ -1,0 +1,17 @@
+{
+    "name": "oleg-gendelman/smart-document-search",
+    "description": "Dev tooling for the Smart Document Search WordPress plugin. Runtime dependencies are vendored (namespace-prefixed) in vendor/ by tools/prefix-vendor.php; Composer is never run on the server.",
+    "type": "project",
+    "license": "GPL-2.0-or-later",
+    "require-dev": {
+        "phpunit/phpunit": "^9.6",
+        "smalot/pdfparser": "2.13.0"
+    },
+    "config": {
+        "vendor-dir": ".dev/vendor",
+        "platform": {
+            "php": "7.4.33"
+        },
+        "sort-packages": true
+    }
+}
