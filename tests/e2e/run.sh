@@ -23,15 +23,25 @@ PLUGIN="smart-document-search"
 export WP_BASE_URL="${WP_BASE_URL:-http://localhost:8888}"
 
 wp() {
-	npx wp-env run cli --env-cwd=/var/www/html -- wp "$@" 2> >(grep -v -E "^(ℹ|✔|-) " >&2)
+	# wp-env echoes every command on stderr; show stderr only when the command fails.
+	local err status
+	err="$(mktemp)"
+	npx wp-env run cli --env-cwd=/var/www/html -- wp "$@" 2>"$err" && status=0 || status=$?
+	if [[ $status -ne 0 ]]; then
+		cat "$err" >&2
+	fi
+	rm -f "$err"
+	return $status
 }
 
 fix_permissions() {
 	# Only needed when the host user is root (CI sandboxes): Apache runs as
 	# www-data there, so it must own wp-content. On a normal machine wp-env
 	# already runs Apache as your user.
+	# Never recurse into wp-content/plugins: the plugin directory is this
+	# repository, mounted read-write.
 	if [[ "$(id -u)" == "0" ]]; then
-		npx wp-env run wordpress chown -R www-data:www-data /var/www/html/wp-content >/dev/null 2>&1 || true
+		npx wp-env run wordpress sh -c 'mkdir -p /var/www/html/wp-content/uploads && chown www-data:www-data /var/www/html/wp-content && chown -R www-data:www-data /var/www/html/wp-content/uploads' >/dev/null 2>&1 || true
 	fi
 }
 

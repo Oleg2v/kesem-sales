@@ -11,9 +11,14 @@ const MOCK = process.env.HDS_E2E_MOCK !== '0';
 const DOCS = [ 'SH-22-06-57879-590', 'ARAR-25-09-8059' ];
 const QUESTION = 'מה הוחלט לגבי החזר האגרה?';
 
-/** Run WP-CLI in the wp-env cli container and return stdout. */
+/**
+ * Run WP-CLI and return stdout: in the wp-env cli container by default, or
+ * through the command prefix in HDS_WP_CLI (e.g. "docker exec my-cli wp").
+ */
 function wp( ...args ) {
-	return execFileSync( 'npx', [ 'wp-env', 'run', 'cli', '--env-cwd=/var/www/html', '--', 'wp', ...args ], {
+	const custom = ( process.env.HDS_WP_CLI || '' ).split( ' ' ).filter( Boolean );
+	const [ cmd, ...prefix ] = custom.length ? custom : [ 'npx', 'wp-env', 'run', 'cli', '--env-cwd=/var/www/html', '--', 'wp' ];
+	return execFileSync( cmd, [ ...prefix, ...args ], {
 		cwd: path.resolve( __dirname, '..' ),
 		encoding: 'utf8',
 		stdio: [ 'ignore', 'pipe', 'ignore' ],
